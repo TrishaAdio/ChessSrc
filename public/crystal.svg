@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2a6b"/>
+      <stop offset="0.55" stop-color="#0d1438"/>
+      <stop offset="1" stop-color="#06301f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.22" r="0.8">
+      <stop offset="0" stop-color="#7fe7ff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7fe7ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="facetA" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#9fdcff" stop-opacity="0.7"/>
+    </linearGradient>
+    <linearGradient id="facetB" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6fd3ff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#2a5bd7" stop-opacity="0.75"/>
+    </linearGradient>
+    <linearGradient id="facetC" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#43e3b0" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#0f7a63" stop-opacity="0.85"/>
+    </linearGradient>
+  </defs>
+  <rect x="40" y="40" width="944" height="944" rx="220" fill="url(#bg)"/>
+  <rect x="40" y="40" width="944" height="944" rx="220" fill="url(#glow)"/>
+  <rect x="41.5" y="41.5" width="941" height="941" rx="218.5" fill="none" stroke="#ffffff" stroke-opacity="0.28" stroke-width="3"/>
+  <!-- crown cross -->
+  <rect x="487" y="150" width="50" height="150" rx="14" fill="url(#facetA)"/>
+  <rect x="437" y="198" width="150" height="50" rx="14" fill="url(#facetA)"/>
+  <!-- faceted crystal king -->
+  <polygon points="512,320 712,430 512,470" fill="url(#facetB)"/>
+  <polygon points="512,320 312,430 512,470" fill="url(#facetA)"/>
+  <polygon points="312,430 512,470 512,860" fill="url(#facetA)" opacity="0.9"/>
+  <polygon points="712,430 512,470 512,860" fill="url(#facetC)"/>
+  <polygon points="312,430 512,860 300,640" fill="url(#facetB)" opacity="0.7"/>
+  <polygon points="712,430 512,860 724,640" fill="url(#facetC)" opacity="0.75"/>
+  <polyline points="312,430 512,320 712,430 724,640 512,860 300,640 312,430" fill="none" stroke="#ffffff" stroke-opacity="0.7" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M312 430 L512 470 L712 430 M512 470 L512 860" stroke="#ffffff" stroke-opacity="0.45" stroke-width="5" fill="none"/>
+</svg>
