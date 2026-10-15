@@ -58,6 +58,31 @@ export interface MoveAnnotation {
   classification: MoveClass;
   evalBefore?: Evaluation;
   evalAfter?: Evaluation;
-  /** Engine best move in UCI, for the review arrows (Phase 3/4). */
+  /** Engine best move (UCI) in the position before this move, for review arrows. */
   bestMove?: string;
+  /** The move actually played (UCI). */
+  playedMove?: string;
+  /** Mover's win % before / after and the loss (percentage points). */
+  winBefore?: number;
+  winAfter?: number;
+  winLoss?: number;
+  /** Human-readable justification from the classifier. */
+  reason?: string;
 }
+
+/** Classes that represent an error worth retrying in review. */
+export const RETRYABLE: ReadonlySet<MoveClass> = new Set<MoveClass>(['mistake', 'blunder', 'miss']);
+
+/** Classes counted in the review breakdown table, in display order. */
+export const BREAKDOWN_ORDER: readonly MoveClass[] = [
+  'brilliant',
+  'great',
+  'best',
+  'excellent',
+  'good',
+  'book',
+  'inaccuracy',
+  'mistake',
+  'miss',
+  'blunder',
+];

@@ -39,12 +39,19 @@
         "font-src": "'self' data:",
         "media-src": "'self' data: blob:",
         "connect-src": "'self' ipc: http://ipc.localhost ws: wss: https:"
+      },
+      "headers": {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp"
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "category": "BoardGame",
     "shortDescription": "Glassmorphic desktop chess",
     "icon": [
@@ -55,8 +62,12 @@
       "icons/icon.ico"
     ],
     "windows": {
-      "webviewInstallMode": { "type": "embedBootstrapper" },
-      "nsis": { "installMode": "currentUser" }
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }

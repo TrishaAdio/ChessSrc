@@ -1,7 +1,8 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { SPRINGS } from '@/lib/motion/springs';
 import { GlassButton, GlassPanel, IconButton } from '@/components/glass/Glass';
-import { IconFirst, IconFlag, IconFlip, IconLast, IconMute, IconNext, IconPlus, IconPrev, IconUndo, IconVolume } from '@/components/glass/Icons';
+import { analysisService } from '@/engine/analysisService';
+import { IconChart, IconFirst, IconFlag, IconFlip, IconLast, IconMute, IconNext, IconPlus, IconPrev, IconUndo, IconVolume } from '@/components/glass/Icons';
 import { useSettings } from '@/store/settingsStore';
 import { useGameStore, type GameOverReason, type GameStatus } from '@/store/gameStore';
 
@@ -34,9 +35,14 @@ function ResultCard({ status, onNewGame }: { status: GameStatus; onNewGame(): vo
               </div>
               <div className="text-[12.5px] text-ink-dim">{REASON[status.reason]}</div>
             </div>
-            <GlassButton variant="accent" size="sm" icon={<IconPlus size={15} />} onClick={onNewGame}>
-              Rematch
-            </GlassButton>
+            <div className="flex flex-col gap-1.5">
+              <GlassButton variant="accent" size="sm" icon={<IconChart size={15} />} onClick={() => analysisService.requestReview()} data-testid="game-review">
+                Game Review
+              </GlassButton>
+              <GlassButton size="sm" icon={<IconPlus size={15} />} onClick={onNewGame}>
+                Rematch
+              </GlassButton>
+            </div>
           </GlassPanel>
         </motion.div>
       )}

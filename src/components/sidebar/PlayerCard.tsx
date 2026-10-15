@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, type ReactNode } from 'react';
 import { motion } from 'framer-motion';
 import type { MaterialSummary } from '@/lib/chess/material';
 import type { Color, PieceSymbol } from '@/lib/chess/types';
@@ -14,6 +14,10 @@ interface PlayerCardProps {
   toMove: boolean;
   material: MaterialSummary;
   clock: ClockState | null;
+  /** Custom avatar (bots); defaults to a king glyph. */
+  avatar?: ReactNode;
+  /** Overlay anchored to the card (speech bubble). */
+  overlay?: ReactNode;
 }
 
 function CapturedRow({ pieces, victimColor }: { pieces: PieceSymbol[]; victimColor: Color }) {
@@ -35,17 +39,17 @@ function CapturedRow({ pieces, victimColor }: { pieces: PieceSymbol[]; victimCol
   );
 }
 
-export const PlayerCard = memo(function PlayerCard({ color, name, subtitle, toMove, material, clock }: PlayerCardProps) {
+export const PlayerCard = memo(function PlayerCard({ color, name, subtitle, toMove, material, clock, avatar, overlay }: PlayerCardProps) {
   const lead = material.lead[color];
   return (
-    <div className="flex h-14 items-center gap-3 px-1">
+    <div className="relative flex h-14 items-center gap-3 px-1" data-testid={`player-card-${color}`}>
       <motion.div
         animate={{ scale: toMove ? 1 : 0.94 }}
         transition={SPRINGS.snappy}
-        className="glass grid size-11 shrink-0 place-items-center"
-        style={{ ['--glass-radius' as string]: '14px' }}
+        className={avatar ? 'relative grid size-11 shrink-0 place-items-center' : 'glass grid size-11 shrink-0 place-items-center'}
+        style={avatar ? undefined : { ['--glass-radius' as string]: '14px' }}
       >
-        <PieceGlyph color={color} type="k" size={30} />
+        {avatar ?? <PieceGlyph color={color} type="k" size={30} />}
         {toMove && (
           <motion.span
             layoutId="turn-dot"
@@ -65,6 +69,7 @@ export const PlayerCard = memo(function PlayerCard({ color, name, subtitle, toMo
         </div>
       </div>
       {clock && <ClockFace clock={clock} color={color} />}
+      {overlay}
     </div>
   );
 });

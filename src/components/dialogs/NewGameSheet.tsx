@@ -3,8 +3,10 @@ import { AnimatePresence, motion } from 'framer-motion';
 import clsx from 'clsx';
 import { SPRINGS } from '@/lib/motion/springs';
 import type { Color } from '@/lib/chess/types';
+import { BOT_ORDER, BOTS, type BotId } from '@/bots/personalities';
 import { GlassButton, GlassPanel } from '@/components/glass/Glass';
 import { PieceGlyph } from '@/components/board/PieceSprite';
+import { BotAvatar } from '@/components/bots/BotAvatar';
 import { TIME_CONTROLS, UNLIMITED, type TimeCategory, type TimeControl } from '@/store/timeControls';
 import { useGameStore, type Opponent, type PlayerSide } from '@/store/gameStore';
 
@@ -29,9 +31,65 @@ function Segmented<T extends string>({ value, options, onChange, layoutId }: { v
 }
 
 const CATEGORY_LABEL: Record<Exclude<TimeCategory, 'unlimited'>, string> = { bullet: 'Bullet', blitz: 'Blitz', rapid: 'Rapid' };
+const SECTION = 'text-[10.5px] font-semibold uppercase tracking-[0.12em] text-ink-faint';
+
+function BotPicker({ value, onChange }: { value: BotId; onChange(id: BotId): void }) {
+  const bot = BOTS[value];
+  return (
+    <div className="flex flex-col gap-2.5">
+      <div className="grid grid-cols-5 gap-2">
+        {BOT_ORDER.map((id) => {
+          const b = BOTS[id];
+          const selected = id === value;
+          return (
+            <motion.button
+              key={id}
+              type="button"
+              data-testid={`bot-${id}`}
+              onClick={() => onChange(id)}
+              whileTap={{ scale: 0.95 }}
+              transition={SPRINGS.snappy}
+              className={clsx('relative flex flex-col items-center gap-1 rounded-2xl px-1 pb-2 pt-2.5', selected ? 'text-ink' : 'text-ink-dim hover:bg-white/[0.05]')}
+            >
+              {selected && (
+                <motion.span
+                  layoutId="ng-bot"
+                  transition={SPRINGS.snappy}
+                  className="absolute inset-0 rounded-2xl bg-white/[0.1] ring-1 ring-white/25"
+                  style={{ boxShadow: `0 0 22px ${b.palette.glow}` }}
+                />
+              )}
+              <span className="relative">
+                <BotAvatar id={id} size={42} />
+              </span>
+              <span className="relative text-[12.5px] font-bold">{b.name}</span>
+              <span className="tabular relative text-[10.5px] text-ink-faint">{b.elo}</span>
+            </motion.button>
+          );
+        })}
+      </div>
+      <AnimatePresence mode="popLayout" initial={false}>
+        <motion.div
+          key={value}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={SPRINGS.snappy}
+          className="glass-inset px-3.5 py-2.5 text-[12.5px]"
+        >
+          <span className="font-semibold text-ink">
+            {bot.name} · {bot.title}
+          </span>
+          <span className="text-ink-dim"> · {bot.tagline}</span>
+        </motion.div>
+      </AnimatePresence>
+    </div>
+  );
+}
 
 export function NewGameSheet({ open, onClose }: { open: boolean; onClose(): void }) {
-  const [opponent, setOpponent] = useState<Opponent>('human');
+  const [opponent, setOpponent] = useState<Opponent>('bot');
+  const [botId, setBotId] = useState<BotId>('kael');
   const [side, setSide] = useState<Color | 'random'>('w');
   const [tc, setTc] = useState<TimeControl>(UNLIMITED);
 
@@ -40,13 +98,14 @@ export function NewGameSheet({ open, onClose }: { open: boolean; onClose(): void
     if (!open) return;
     const s = useGameStore.getState();
     setOpponent(s.opponent);
+    setBotId(s.botId);
     setSide(s.playerSide === 'b' ? 'b' : 'w');
     setTc(s.timeControl);
   }, [open]);
 
   const start = () => {
     const playerSide: PlayerSide = opponent === 'human' ? 'both' : side === 'random' ? (Math.random() < 0.5 ? 'w' : 'b') : side;
-    useGameStore.getState().newGame({ opponent, playerSide, timeControl: tc });
+    useGameStore.getState().newGame({ opponent, botId, playerSide, timeControl: tc });
     onClose();
   };
 
@@ -67,39 +126,40 @@ export function NewGameSheet({ open, onClose }: { open: boolean; onClose(): void
             animate={{ scale: 1, y: 0, opacity: 1 }}
             exit={{ scale: 0.95, y: 12, opacity: 0 }}
             transition={SPRINGS.gentle}
-            className="relative w-[520px]"
+            className="relative w-[560px]"
             role="dialog"
             aria-label="New game"
           >
             <GlassPanel strong radius={28} className="flex flex-col gap-5 p-6">
               <div>
                 <h2 className="font-display text-[22px] font-bold tracking-tight">New Game</h2>
-                <p className="text-[12.5px] text-ink-faint">Stockfish bots arrive in Phase 3; online play in Phase 4.</p>
+                <p className="text-[12.5px] text-ink-faint">Online play arrives in Phase 4.</p>
               </div>
 
               <section className="flex flex-col gap-2">
-                <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-ink-faint">Opponent</span>
+                <span className={SECTION}>Opponent</span>
                 <Segmented<Opponent>
                   layoutId="ng-opp"
                   value={opponent}
                   onChange={setOpponent}
                   options={[
+                    { value: 'bot', label: 'Computer' },
                     { value: 'human', label: 'Pass & Play' },
-                    { value: 'sparring', label: 'Sparring Partner (dev)' },
                   ]}
                 />
               </section>
 
               <AnimatePresence initial={false}>
-                {opponent === 'sparring' && (
+                {opponent === 'bot' && (
                   <motion.section
-                    className="flex flex-col gap-2 overflow-hidden"
+                    className="flex flex-col gap-3 overflow-hidden"
                     initial={{ height: 0, opacity: 0 }}
                     animate={{ height: 'auto', opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}
                     transition={SPRINGS.gentle}
                   >
-                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-ink-faint">Play as</span>
+                    <BotPicker value={botId} onChange={setBotId} />
+                    <span className={SECTION}>Play as</span>
                     <Segmented<Color | 'random'>
                       layoutId="ng-side"
                       value={side}
@@ -115,7 +175,7 @@ export function NewGameSheet({ open, onClose }: { open: boolean; onClose(): void
               </AnimatePresence>
 
               <section className="flex flex-col gap-2.5">
-                <span className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-ink-faint">Time control</span>
+                <span className={SECTION}>Time control</span>
                 {(['bullet', 'blitz', 'rapid'] as const).map((cat) => (
                   <div key={cat} className="flex items-center gap-2">
                     <span className="w-14 text-[12px] font-semibold text-ink-dim">{CATEGORY_LABEL[cat]}</span>

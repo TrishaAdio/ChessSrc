@@ -10,7 +10,10 @@ import { MoveList } from '@/components/sidebar/MoveList';
 import { OpeningTicker } from '@/components/sidebar/OpeningTicker';
 import { useAmbientTension } from '@/hooks/useAmbientTension';
 import { useBackdrop } from '@/hooks/useBackdrop';
-import { useClockWatcher, useKeyboardShortcuts, useSparringPartner } from '@/hooks/useGameLoop';
+import { useClockWatcher, useKeyboardShortcuts } from '@/hooks/useGameLoop';
+import { useBotBanter, useBotOpponent } from '@/bots/useBotOpponent';
+import { BOTS } from '@/bots/personalities';
+import { analysisService } from '@/engine/analysisService';
 import { soundBus } from '@/lib/audio/soundBus';
 import { useGameStore } from '@/store/gameStore';
 import { NavRail, type Section } from './NavRail';
@@ -39,10 +42,16 @@ export function App() {
   const [labOpen, setLabOpen] = useState(false);
   const tc = useGameStore((s) => s.timeControl);
   const opponent = useGameStore((s) => s.opponent);
+  const botId = useGameStore((s) => s.botId);
 
   useClockWatcher();
-  useSparringPartner();
+  useBotOpponent();
+  useBotBanter();
   useKeyboardShortcuts();
+
+  useEffect(() => {
+    void analysisService.start();
+  }, []);
 
   useEffect(() => {
     // Unlock Web Audio on the first gesture (autoplay policy).
@@ -58,7 +67,7 @@ export function App() {
     };
   }, []);
 
-  const subtitle = `${opponent === 'sparring' ? 'vs Sparring Partner' : 'Pass & Play'} · ${tc.category === 'unlimited' ? 'Unlimited' : `${tc.label} ${tc.category}`}`;
+  const subtitle = `${opponent === 'bot' ? `vs ${BOTS[botId].name} (${BOTS[botId].elo})` : 'Pass & Play'} · ${tc.category === 'unlimited' ? 'Unlimited' : `${tc.label} ${tc.category}`}`;
 
   return (
     <MotionConfig reducedMotion="user">

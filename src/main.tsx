@@ -12,8 +12,8 @@ createRoot(document.getElementById('root')!).render(
 
 // DEV: expose the store for console debugging and automated smoke tests.
 if (import.meta.env.DEV) {
-  void import('@/store/gameStore').then(({ useGameStore }) => {
-    (window as unknown as { __cc: typeof useGameStore }).__cc = useGameStore;
+  void Promise.all([import('@/store/gameStore'), import('chess.js')]).then(([{ useGameStore }, { Chess }]) => {
+    Object.assign(window, { __cc: useGameStore, __ccChess: Chess });
   });
 }
 

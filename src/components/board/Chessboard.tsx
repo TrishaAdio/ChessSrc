@@ -9,6 +9,7 @@ import type { MoveClass } from '@/lib/classification';
 import { SPRINGS } from '@/lib/motion/springs';
 import type { BoardFx } from '@/store/gameStore';
 import { CoordinatesLayer, HighlightsLayer, LegalHintsLayer, PremoveTrailsLayer, SquaresLayer, type Highlight } from './BoardLayers';
+import { ArrowsLayer, type BoardArrow } from './ArrowsLayer';
 import { ImpactLayer, type Shockwave } from './ImpactLayer';
 import { MoveBadge } from './MoveBadge';
 import { Piece, Z, type PieceMotion } from './Piece';
@@ -37,6 +38,8 @@ export interface ChessboardProps {
   premoves: readonly Premove[];
   badge: BadgeSpec | null;
   fx: BoardFx | null;
+  /** Analysis arrows (best vs. played). */
+  arrows?: readonly BoardArrow[];
   showCoordinates?: boolean;
   showLegalMoves?: boolean;
   /** Return true if the move was accepted. */
@@ -63,6 +66,7 @@ interface PendingPromotion {
 }
 
 const EMPTY_SET: ReadonlySet<Square> = new Set();
+const NO_ARROWS: readonly BoardArrow[] = [];
 const DRAG_THRESHOLD_PX = 4;
 
 function pointToSquare(clientX: number, clientY: number, rect: DOMRect, orientation: Color): Square | null {
@@ -102,6 +106,7 @@ export function Chessboard({
   premoves,
   badge,
   fx,
+  arrows = NO_ARROWS,
   showCoordinates = true,
   showLegalMoves = true,
   onMove,
@@ -458,6 +463,7 @@ export function Chessboard({
           })}
         </AnimatePresence>
 
+        <ArrowsLayer arrows={arrows} orientation={orientation} />
         <ImpactLayer waves={waves} orientation={orientation} size={sq} onDone={removeWave} />
 
         <AnimatePresence>
