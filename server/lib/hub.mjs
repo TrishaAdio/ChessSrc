@@ -14,9 +14,11 @@ import {
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
 } from './protocol.mjs';
-import { DEFAULT_ABANDON_GRACE_MS, Room } from './room.mjs';
+import { DEFAULT_ABANDON_GRACE_MS, DEFAULT_FIRST_MOVE_ABORT_MS, Room } from './room.mjs';
 
 const MAX_NAME_LENGTH = 24;
+/** Back-stop so a single host cannot exhaust the process with open sockets. */
+export const DEFAULT_MAX_CONNECTIONS = 1_000;
 const ROOM_CODE_RE = new RegExp(`^[${ROOM_CODE_ALPHABET}]{${ROOM_CODE_LENGTH}}$`);
 /** Repeated throttling notices would themselves be a flood, so rate-limit them. */
 const RATE_WARN_INTERVAL_MS = 1_000;
@@ -37,6 +39,8 @@ export class Hub {
    * @param {number|null} [opts.initialMsOverride] Test-only shortened initial clock.
    * @param {number|null} [opts.chess960Id] Test-only forced Chess960 position id.
    * @param {number} [opts.abandonGraceMs]
+   * @param {number} [opts.firstMoveAbortMs]
+   * @param {number} [opts.maxConnections]
    * @param {number} [opts.heartbeatMs]
    * @param {number} [opts.clockTickMs]
    * @param {(msg: string) => void} [opts.log]
@@ -45,6 +49,8 @@ export class Hub {
     initialMsOverride = null,
     chess960Id = null,
     abandonGraceMs = DEFAULT_ABANDON_GRACE_MS,
+    firstMoveAbortMs = DEFAULT_FIRST_MOVE_ABORT_MS,
+    maxConnections = DEFAULT_MAX_CONNECTIONS,
     heartbeatMs = 5_000,
     clockTickMs = 5_000,
     log = () => {},
@@ -52,6 +58,8 @@ export class Hub {
     this.initialMsOverride = initialMsOverride;
     this.chess960Id = chess960Id;
     this.abandonGraceMs = abandonGraceMs;
+    this.firstMoveAbortMs = firstMoveAbortMs;
+    this.maxConnections = maxConnections;
     this.log = log;
 
     /** @type {Set<Client>} */
@@ -93,6 +101,11 @@ export class Hub {
    */
   handleConnection(ws) {
     const client = new Client(ws);
+    if (this.clients.size >= this.maxConnections) {
+      client.error('rate-limited', 'Server is at capacity, try again shortly.');
+      ws.close(1013, 'try again later');
+      return client;
+    }
     this.clients.add(client);
 
     ws.on('message', (data, isBinary) => {
@@ -229,7 +242,7 @@ export class Hub {
         return;
       case 'leave':
         this.#dequeue(client);
-        client.room?.detach(client);
+        client.room?.detach(client, { voluntary: true });
         return;
       default:
         client.error('bad-message', `Unknown message type \`${msg.t}\`.`);
@@ -275,8 +288,14 @@ export class Hub {
    * @param {any} msg
    */
   #onPing(client, msg) {
+    // `pong.t0` is declared `number`; echoing an arbitrary value back would put
+    // a malformed message on the wire in the server's own name.
+    if (typeof msg.t0 !== 'number' || !Number.isFinite(msg.t0)) {
+      client.error('bad-message', '`ping.t0` must be a finite number.');
+      return;
+    }
     const serverTs = Date.now();
-    if (typeof msg.t0 === 'number') client.rtt.addPing(msg.t0, serverTs);
+    client.rtt.addPing(msg.t0, serverTs);
     client.send({ t: 'pong', t0: msg.t0, serverTs });
   }
 
@@ -426,11 +445,18 @@ export class Hub {
       room.reject(client, 'bad-message', 'move needs valid `from`/`to` squares.');
       return;
     }
+    // `ply` is required by the protocol: it is the desync guard, and the client
+    // is the party that benefits from omitting it, so treat absence as an error
+    // rather than quietly skipping the staleness check.
+    if (!Number.isInteger(msg.ply) || msg.ply < 0) {
+      room.reject(client, 'bad-message', 'move needs a non-negative integer `ply`.');
+      return;
+    }
     room.applyMove(client, {
       from: msg.from,
       to: msg.to,
       ...(msg.promotion ? { promotion: msg.promotion } : {}),
-      ...(typeof msg.ply === 'number' ? { ply: msg.ply } : {}),
+      ply: msg.ply,
     });
   }
 
@@ -453,6 +479,7 @@ export class Hub {
       initialMsOverride: this.initialMsOverride,
       chess960Id: this.chess960Id,
       abandonGraceMs: this.abandonGraceMs,
+      firstMoveAbortMs: this.firstMoveAbortMs,
       onEmpty: (r) => {
         if (this.rooms.get(r.code) !== r) return;
         this.rooms.delete(r.code);

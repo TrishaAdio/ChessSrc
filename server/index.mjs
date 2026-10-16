@@ -12,8 +12,8 @@ import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer } from 'ws';
 
-import { Hub } from './lib/hub.mjs';
-import { DEFAULT_ABANDON_GRACE_MS } from './lib/room.mjs';
+import { DEFAULT_MAX_CONNECTIONS, Hub } from './lib/hub.mjs';
+import { DEFAULT_ABANDON_GRACE_MS, DEFAULT_FIRST_MOVE_ABORT_MS } from './lib/room.mjs';
 import { PROTOCOL_VERSION } from './lib/protocol.mjs';
 
 /** Frames larger than this are dropped by `ws` before we ever parse them. */
@@ -51,6 +51,9 @@ function intEnv(raw, fallback) {
  * @param {number|null} [options.initialMsOverride] Shortens every clock; test hook.
  * @param {number|null} [options.chess960Id] Forces a Chess960 position; test hook.
  * @param {number} [options.abandonGraceMs] Reconnection window for dropped players.
+ * @param {number} [options.firstMoveAbortMs] Window for the free opening move.
+ * @param {number} [options.maxConnections]
+ * @param {string[]|null} [options.allowedOrigins] When set, rejects other `Origin` headers.
  * @param {boolean} [options.quiet] Suppresses the per-event log lines.
  * @returns {Promise<ServerHandle>}
  */
@@ -61,6 +64,19 @@ export async function startServer(options = {}) {
   const chess960Id = options.chess960Id ?? intEnv(process.env.TEST_CHESS960_ID, null);
   const abandonGraceMs =
     options.abandonGraceMs ?? intEnv(process.env.ABANDON_GRACE_MS, DEFAULT_ABANDON_GRACE_MS) ?? DEFAULT_ABANDON_GRACE_MS;
+  const firstMoveAbortMs =
+    options.firstMoveAbortMs ??
+    intEnv(process.env.FIRST_MOVE_ABORT_MS, DEFAULT_FIRST_MOVE_ABORT_MS) ??
+    DEFAULT_FIRST_MOVE_ABORT_MS;
+  const maxConnections =
+    options.maxConnections ?? intEnv(process.env.MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS) ?? DEFAULT_MAX_CONNECTIONS;
+  const allowedOrigins =
+    options.allowedOrigins ??
+    (process.env.ALLOWED_ORIGINS
+      ? process.env.ALLOWED_ORIGINS.split(',')
+          .map((o) => o.trim())
+          .filter(Boolean)
+      : null);
   const quiet = options.quiet ?? process.env.QUIET === '1';
 
   /** @param {string} msg */
@@ -68,7 +84,7 @@ export async function startServer(options = {}) {
     if (!quiet) console.log(`[crystalchess] ${msg}`);
   };
 
-  const hub = new Hub({ initialMsOverride, chess960Id, abandonGraceMs, log });
+  const hub = new Hub({ initialMsOverride, chess960Id, abandonGraceMs, firstMoveAbortMs, maxConnections, log });
 
   const http = createServer((req, res) => {
     if (req.url?.split('?')[0] === '/health' && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -86,7 +102,19 @@ export async function startServer(options = {}) {
     res.end(body);
   });
 
-  const wss = new WebSocketServer({ server: http, maxPayload: MAX_PAYLOAD_BYTES });
+  const wss = new WebSocketServer({
+    server: http,
+    maxPayload: MAX_PAYLOAD_BYTES,
+    // Opt-in origin allowlist. Left unset by default because the desktop shell
+    // and local dev tooling present a variety of origins; set ALLOWED_ORIGINS
+    // in a hosted deployment to stop arbitrary web pages opening sockets.
+    ...(allowedOrigins
+      ? {
+          verifyClient: (/** @type {{ origin?: string }} */ info) =>
+            !info.origin || allowedOrigins.includes(info.origin),
+        }
+      : {}),
+  });
   wss.on('connection', (ws) => {
     const client = hub.handleConnection(ws);
     log(`connection ${client.id} (${hub.clients.size} online)`);

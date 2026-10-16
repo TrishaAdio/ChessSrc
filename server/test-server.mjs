@@ -14,6 +14,7 @@ import { WebSocket } from 'ws';
 import { startServer } from './index.mjs';
 import { hasMatingMaterial } from './lib/clock.mjs';
 import { PROTOCOL_VERSION, ROOM_CODE_ALPHABET, ROOM_CODE_LENGTH, WIRE_TIME_CONTROLS } from './lib/protocol.mjs';
+import { RttEstimator } from './lib/rtt.mjs';
 import { chess960Setup, createEngine } from './vendor/variant-engine.mjs';
 
 /* ───────────────────────────── harness ───────────────────────────── */
@@ -314,6 +315,97 @@ async function protocolParity() {
     parsed[m[1]] = { initialMs: Number(m[2].replace(/_/g, '')), incrementMs: Number(m[3].replace(/_/g, '')) };
   }
   eq(parsed, WIRE_TIME_CONTROLS, 'WIRE_TIME_CONTROLS matches protocol.ts (all 8 entries)');
+
+  /* The server duplicates these names as string literals; guard against drift. */
+  /** @param {string} from @param {string} to */
+  const literals = (from, to) => {
+    const section = src.slice(src.indexOf(from), to ? src.indexOf(to) : undefined);
+    return [...section.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  };
+  const clientTypes = new Set(
+    [...src.slice(src.indexOf('export type ClientMessage'), src.indexOf('export type ServerMessage')).matchAll(/\bt: '(\w+)'/g)].map(
+      (m) => m[1],
+    ),
+  );
+  const serverTypes = new Set(
+    [...src.slice(src.indexOf('export type ServerMessage'), src.indexOf('export type ErrorCode')).matchAll(/\bt: '(\w+)'/g)].map(
+      (m) => m[1],
+    ),
+  );
+  const errorCodes = new Set(literals('export type ErrorCode', 'isServerMessage'));
+  const endReasons = new Set(literals('export type GameEndReason', 'export interface WireMove'));
+
+  const serverSource = ['index.mjs', 'lib/hub.mjs', 'lib/room.mjs', 'lib/clock.mjs', 'lib/client.mjs', 'lib/protocol.mjs']
+    .map((f) => readFileSync(new URL(`./${f}`, import.meta.url), 'utf8'))
+    .join('\n');
+
+  const handled = new Set([...readFileSync(new URL('./lib/hub.mjs', import.meta.url), 'utf8').matchAll(/case '(\w+)':/g)].map((m) => m[1]));
+  eq([...clientTypes].filter((t) => !handled.has(t)), [], 'every ClientMessage type is dispatched by the hub');
+
+  const emitted = new Set([...serverSource.matchAll(/\{ t: '(\w+)'/g)].map((m) => m[1]));
+  eq([...emitted].filter((t) => !serverTypes.has(t)), [], 'the server emits no message type outside ServerMessage');
+  eq([...serverTypes].filter((t) => !emitted.has(t)), [], 'every ServerMessage type is actually emitted');
+
+  const usedCodes = new Set([...serverSource.matchAll(/(?:error|reject)\((?:client, )?'([a-z-]+)'/g)].map((m) => m[1]));
+  eq([...usedCodes].filter((c) => !errorCodes.has(c)), [], 'the server uses no ErrorCode outside the protocol union');
+  const usedReasons = new Set([...serverSource.matchAll(/#end\([^,]+, '([a-z-]+)'/g)].map((m) => m[1]));
+  eq([...usedReasons].filter((r) => !endReasons.has(r)), [], 'the server uses no GameEndReason outside the protocol union');
+}
+
+/** The Chess960 id must always rebuild the exact advertised start FEN. */
+async function chess960FenContract() {
+  /** @type {number[]} */
+  const mismatched = [];
+  for (let id = 0; id < 960; id++) {
+    const setup = chess960Setup(id);
+    const srv = { startFen: setup.fen }; // what Room publishes (see Room.#newGame)
+    if (srv.startFen !== chess960Setup(id).fen) mismatched.push(id);
+  }
+  eq(mismatched, [], 'chess960Setup(id).fen is reproducible for all 960 ids');
+
+  // Every setup FEN must be directly playable by the engine, since the room
+  // hands it to createEngine untouched rather than normalising it.
+  /** @type {number[]} */
+  const unplayable = [];
+  for (let id = 0; id < 960; id++) {
+    const setup = chess960Setup(id);
+    const engine = createEngine('chess960', setup.fen);
+    if (engine.fen().split(' ')[0] !== setup.fen.split(' ')[0] || engine.moves().length === 0) unplayable.push(id);
+  }
+  eq(unplayable, [], 'all 960 Chess960 start FENs are playable as published');
+}
+
+/** The RTT estimator sizes the lag credit, so a client must not be able to inflate it. */
+async function rttEstimator() {
+  const fresh = new RttEstimator();
+  eq(fresh.rttMs, 0, 'a fresh RTT estimator reports 0 (no lag credit)');
+
+  const frames = new RttEstimator();
+  for (const v of [40, 50, 60, 2_000]) frames.addRoundTrip(v);
+  eq(frames.rttMs, 55, 'the estimate is the median of recent round trips, not the mean');
+
+  // A single `ping` whose `t0` claims the future used to pin the estimate to
+  // the 2000ms clamp, buying the maximum lag credit on every later move.
+  const poisoned = new RttEstimator();
+  const base = Date.now();
+  poisoned.addPing(base + 600_000, base); // ten minutes in the future
+  for (let i = 1; i <= 6; i++) poisoned.addPing(base + i * 100, base + i * 100 + 30);
+  ok(poisoned.rttMs <= 200, `a skewed ping.t0 cannot inflate the estimate (got ${poisoned.rttMs}ms)`);
+
+  // Server-measured frames outrank anything derived from client timestamps.
+  const mixed = new RttEstimator();
+  const t = Date.now();
+  mixed.addPing(t, t); // baseline
+  for (let i = 1; i <= 5; i++) mixed.addPing(t + i, t + i + 400); // ~800ms derived
+  mixed.addRoundTrip(30);
+  eq(mixed.rttMs, 30, 'server-measured pong frames take precedence over client-derived samples');
+
+  // Honest one-way samples still work for peers that ignore control frames.
+  const derived = new RttEstimator();
+  const u = Date.now();
+  derived.addPing(u, u);
+  for (let i = 1; i <= 5; i++) derived.addPing(u + i, u + i + 25);
+  eq(derived.rttMs, 50, 'application pings still yield an estimate when no frames exist');
 }
 
 /** @param {string} url */
@@ -802,6 +894,100 @@ async function disconnectAndReconnect() {
   }
 }
 
+/** An explicit `leave` is deliberate, so it forfeits at once rather than idling out a grace window. */
+async function leaveForfeits() {
+  const srv = await boot({ abandonGraceMs: 30_000 });
+  const { white, black, game } = await matchedPair(srv.url, '5+0', 'standard', 'leave');
+  await game.play([{ from: 'e2', to: 'e4' }]);
+
+  white.send({ t: 'leave' });
+  const over = await black.expect('over', 2_000); // Must NOT wait out the 30s grace.
+  eq(over.reason, 'abandoned', 'leaving a live game ends it immediately as abandoned');
+  eq(over.winner, 'b', 'the player who stayed wins after an opponent leaves');
+
+  // And the quitter is free to queue, without a stale seat pinning the old room.
+  white.send({ t: 'queue', tc: '5+0', variant: 'standard' });
+  eq((await white.expect('queued')).size, 1, 'a client that left can queue again');
+  white.send({ t: 'unqueue' });
+  await white.expect('unqueued');
+  white.close();
+  black.close();
+}
+
+/** A reclaimed seat keeps the original player's name: the chair is not an identity. */
+async function seatIdentity() {
+  const srv = await boot({ abandonGraceMs: 2_000 });
+  const { white, black, roomA, game } = await matchedPair(srv.url, '5+0', 'standard', 'seat');
+  // The white seat is the one that gets vacated and reclaimed below.
+  const originalName = roomA.room.players.white?.name;
+  await game.play([{ from: 'e2', to: 'e4' }]);
+
+  white.ws.terminate();
+  await black.expect('presence');
+  const taker = await peer(srv.url, 'IMPOSTOR');
+  taker.send({ t: 'join', code: roomA.room.code });
+  const seated = await taker.expect('room');
+  eq(seated.room.players.white?.name, originalName, 'a reclaimed seat keeps the original player name');
+  ok(seated.room.players.white?.name !== 'IMPOSTOR', 'reconnecting does not rewrite the scoresheet');
+  taker.close();
+  black.close();
+}
+
+/** `move.ply` is required by the protocol: it is the desync guard. */
+async function plyIsRequired(url) {
+  const { a, b, white } = await matchedPair(url, '3+2', 'standard', 'ply');
+  white.send({ t: 'move', from: 'e2', to: 'e4' });
+  eq((await white.expect('error')).code, 'bad-message', 'a `move` without `ply` → error bad-message');
+  await white.expect('resync');
+  ok(true, 'a `move` without `ply` is followed by a resync');
+
+  white.send({ t: 'move', from: 'e2', to: 'e4', ply: 'zero' });
+  eq((await white.expect('error')).code, 'bad-message', 'a non-numeric `ply` → error bad-message');
+  await white.expect('resync');
+
+  white.send({ t: 'ping' });
+  eq((await white.expect('error')).code, 'bad-message', 'a `ping` without a numeric `t0` → error bad-message');
+  a.close();
+  b.close();
+}
+
+/** Nothing should hold a room open forever just by never making the free first move. */
+async function openingAbort() {
+  const srv = await boot({ firstMoveAbortMs: 400 });
+  const { white, black } = await matchedPair(srv.url, 'unlimited', 'standard', 'abort');
+  const over = await black.expect('over', 3_000);
+  eq(over.reason, 'abandoned', 'a game where the opening move never arrives is aborted');
+  eq(over.winner, 'b', 'the waiting player is awarded the aborted game');
+  ok(!white.everSaw('move'), 'no move was ever played in the aborted game');
+  white.close();
+  black.close();
+}
+
+/** Fog of War flag-fall must not be downgraded by the mate-material rule. */
+async function fogFlagFall() {
+  const srv = await boot({ initialMsOverride: 350 });
+  const { white, black, game } = await matchedPair(srv.url, '3+0', 'fog', 'fogflag');
+  await game.play([{ from: 'e2', to: 'e4' }]);
+  const over = await black.expect('over', 3_000);
+  eq(over.reason, 'timeout', 'a Fog of War game is flagged by the server too');
+  eq(over.winner, 'w', 'the Fog of War flag-fall awards the win, never a material draw');
+  white.close();
+  black.close();
+}
+
+/** The connection cap is a back-stop against socket exhaustion. */
+async function connectionCap() {
+  const srv = await boot({ maxConnections: 1 });
+  const first = await peer(srv.url, 'cap-first');
+  const second = new Peer(srv.url, 'cap-second');
+  allPeers.push(second);
+  await second.open();
+  const err = await second.expect('error', 2_000);
+  eq(err.code, 'rate-limited', 'a connection beyond maxConnections is refused');
+  first.close();
+  second.close();
+}
+
 /** @param {number} port */
 async function health(port) {
   const res = await fetch(`http://127.0.0.1:${port}/health`);
@@ -820,6 +1006,8 @@ async function run() {
   const server = await boot();
 
   await suite('protocol parity with src/multiplayer/protocol.ts', () => protocolParity());
+  await suite('Chess960 id ↔ startFen contract (all 960 positions)', () => chess960FenContract());
+  await suite('RTT estimator cannot be inflated by a client', () => rttEstimator());
   await suite('handshake, errors and flood protection', () => handshake(server.url));
   await suite('matchmaking + a full game to mate, with clocks', () => queueAndFullGame(server.url));
   await suite('Fischer increment', () => incrementApplied(server.url));
@@ -829,11 +1017,17 @@ async function run() {
   await suite('draw offer / decline / accept', () => drawFlow(server.url));
   await suite('queue and unqueue', () => unqueueFlow(server.url));
   await suite('queues are keyed by variant + time control', () => queueKeying(server.url));
+  await suite('`move.ply` and `ping.t0` are required', () => plyIsRequired(server.url));
   await suite('unlimited time control', () => unlimitedClocks(server.url));
   await suite('server-adjudicated flag-fall', () => flagFall());
+  await suite('Fog of War flag-fall is not downgraded', () => fogFlagFall());
   await suite('Chess960 with king-onto-rook castling', () => chess960(server.url));
   await suite('Fog of War: into-check legal, king-captured', () => fogOfWar(server.url));
   await suite('disconnect, reconnect grace and abandonment', () => disconnectAndReconnect());
+  await suite('`leave` forfeits immediately', () => leaveForfeits());
+  await suite('a reclaimed seat keeps its identity', () => seatIdentity());
+  await suite('the opening move has an abort window', () => openingAbort());
+  await suite('connection cap', () => connectionCap());
   await suite('GET /health', () => health(server.port));
 
   for (const p of allPeers) p.close();

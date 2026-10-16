@@ -23,6 +23,14 @@ export const MAX_SPECTATORS = 64;
 /** Reconnection window for a player who drops mid-game. */
 export const DEFAULT_ABANDON_GRACE_MS = 30_000;
 
+/**
+ * How long white has to make the (free) opening move before the game aborts.
+ *
+ * The first move costs no clock time by design, which would otherwise let a
+ * connected-but-idle player hold a room and an opponent open forever.
+ */
+export const DEFAULT_FIRST_MOVE_ABORT_MS = 30_000;
+
 export class Room {
   /**
    * @param {object} opts
@@ -33,6 +41,7 @@ export class Room {
    * @param {number|null} [opts.initialMsOverride] Test-only shortened clock.
    * @param {number|null} [opts.chess960Id] Forced Chess960 position (tests).
    * @param {number} [opts.abandonGraceMs]
+   * @param {number} [opts.firstMoveAbortMs]
    * @param {(room: Room) => void} [opts.onEmpty] Called when nothing references the room.
    */
   constructor({
@@ -43,6 +52,7 @@ export class Room {
     initialMsOverride = null,
     chess960Id = null,
     abandonGraceMs = DEFAULT_ABANDON_GRACE_MS,
+    firstMoveAbortMs = DEFAULT_FIRST_MOVE_ABORT_MS,
     onEmpty = () => {},
   }) {
     /** @readonly */ this.code = code;
@@ -51,8 +61,11 @@ export class Room {
     /** @readonly */ this.private = isPrivate;
     /** @readonly */ this.createdAt = Date.now();
     this.abandonGraceMs = abandonGraceMs;
+    this.firstMoveAbortMs = firstMoveAbortMs;
     this.forcedChess960Id = chess960Id;
     this.onEmpty = onEmpty;
+    /** @type {NodeJS.Timeout|null} Fires if the opening move never arrives. */
+    this.abortTimer = null;
 
     /** @type {{ white: Seat|null, black: Seat|null }} */
     this.seats = { white: null, black: null };
@@ -86,14 +99,19 @@ export class Room {
       const id = forcedId ?? this.forcedChess960Id ?? randomChess960Id();
       const setup = chess960Setup(id);
       /** @type {number|undefined} */ this.chess960Id = setup.id;
+      // Report `chess960Setup(id).fen` verbatim. The protocol exposes
+      // `chess960Id` so a client can rebuild the position itself, and the two
+      // must agree textually — the engine re-renders Shredder castling rights
+      // in an equivalent but different style (`HDhd` → `KDkd`) for 84 of the
+      // 960 positions, so normalising through `engine.fen()` would silently
+      // break that correspondence.
       this.startFen = setup.fen;
+      this.engine = createEngine('chess960', setup.fen);
     } else {
       this.chess960Id = undefined;
-      this.startFen = undefined; // createEngine applies the standard default
+      this.engine = createEngine(this.variant); // createEngine applies the standard default
+      this.startFen = this.engine.fen();
     }
-    this.engine = createEngine(this.variant, this.startFen);
-    // Normalise: always report the concrete FEN the game actually started from.
-    this.startFen = this.engine.fen();
     this.moves = [];
     this.drawOfferBy = null;
     this.rematchAsked.clear();
@@ -117,6 +135,7 @@ export class Room {
   /** @returns {void} */
   dispose() {
     this.clock.dispose();
+    this.#clearAbort();
     for (const role of /** @type {const} */ (['white', 'black'])) {
       const seat = this.seats[role];
       if (seat?.graceTimer) clearTimeout(seat.graceTimer);
@@ -163,11 +182,12 @@ export class Room {
     for (const role of /** @type {const} */ (['white', 'black'])) {
       const seat = this.seats[role];
       if (seat && !seat.client) {
-        // Dropped player returning within the grace window.
+        // Dropped player returning within the grace window. The seat keeps its
+        // original name: the chair belongs to whoever sat down first, so a
+        // reconnect cannot rewrite the scoresheet.
         if (seat.graceTimer) clearTimeout(seat.graceTimer);
         seat.graceTimer = null;
         seat.client = client;
-        seat.name = client.name;
         client.room = this;
         client.role = role;
         this.#broadcastPresence();
@@ -201,19 +221,39 @@ export class Room {
   startGame() {
     this.status = { state: 'playing' };
     this.clock.start();
+    this.#armAbort();
+  }
+
+  /** Arms the opening-move abort; the free first move has no clock to protect it. */
+  #armAbort() {
+    this.#clearAbort();
+    this.abortTimer = setTimeout(() => {
+      this.abortTimer = null;
+      if (this.isPlaying && this.moves.length === 0) this.#abandon('white');
+      if (this.isAbandonedShell) this.onEmpty(this);
+    }, this.firstMoveAbortMs);
+    this.abortTimer.unref?.();
+  }
+
+  #clearAbort() {
+    if (this.abortTimer) clearTimeout(this.abortTimer);
+    this.abortTimer = null;
   }
 
   /**
    * Detaches a client (socket close or explicit `leave`).
    *
-   * A player who vanishes mid-game keeps their seat for `abandonGraceMs` so a
-   * flaky connection does not instantly lose a game; the seat only forfeits
-   * when the window closes.
+   * A player whose socket *vanishes* mid-game keeps their seat for
+   * `abandonGraceMs` so a flaky connection does not instantly lose a game. An
+   * explicit `leave` is a deliberate act, so it forfeits straight away — a
+   * grace window there would let a quitter hold their opponent hostage while
+   * starting a second game elsewhere.
    *
    * @param {Client} client
+   * @param {{ voluntary?: boolean }} [opts]
    * @returns {void}
    */
-  detach(client) {
+  detach(client, { voluntary = false } = {}) {
     const role = this.roleOf(client);
     client.room = null;
     client.role = null;
@@ -223,14 +263,20 @@ export class Room {
     } else if (role === 'white' || role === 'black') {
       const seat = /** @type {Seat} */ (this.seats[role]);
       seat.client = null;
+      // A departing player's rematch request must not outlive them.
+      this.rematchAsked.delete(role);
       this.#broadcastPresence();
       if (this.isPlaying) {
-        seat.graceTimer = setTimeout(() => {
-          seat.graceTimer = null;
-          if (this.isPlaying && !seat.client) this.#abandon(role);
-          if (this.isAbandonedShell) this.onEmpty(this);
-        }, this.abandonGraceMs);
-        seat.graceTimer.unref?.();
+        if (voluntary) {
+          this.#abandon(role);
+        } else {
+          seat.graceTimer = setTimeout(() => {
+            seat.graceTimer = null;
+            if (this.isPlaying && !seat.client) this.#abandon(role);
+            if (this.isAbandonedShell) this.onEmpty(this);
+          }, this.abandonGraceMs);
+          seat.graceTimer.unref?.();
+        }
       }
     } else {
       return; // not a member
@@ -328,7 +374,7 @@ export class Room {
   /**
    * Validates and applies a move, then broadcasts it with fresh clocks.
    * @param {Client} client
-   * @param {{ from: string, to: string, promotion?: string, ply?: number }} req
+   * @param {{ from: string, to: string, promotion?: string, ply: number }} req
    * @returns {void}
    */
   applyMove(client, req) {
@@ -348,7 +394,7 @@ export class Room {
     }
     // `ply` is the 0-based index of the move being submitted. A mismatch means
     // the client is acting on a stale position, so repair it rather than guess.
-    if (typeof req.ply === 'number' && req.ply !== this.moves.length) {
+    if (req.ply !== this.moves.length) {
       this.reject(client, 'illegal-move', `Stale ply ${req.ply}; server is at ${this.moves.length}.`);
       return;
     }
@@ -381,6 +427,7 @@ export class Room {
       fen: this.engine.fen(),
     };
     this.moves.push(move);
+    this.#clearAbort(); // The game is under way; the clocks take over from here.
     this.drawOfferBy = null; // Moving implicitly withdraws/declines a pending offer.
     this.broadcast({ t: 'move', move, clocks: this.clock.snapshot(now) });
 
@@ -441,8 +488,8 @@ export class Room {
    */
   declineDraw(client) {
     const role = this.roleOf(client);
-    if (role !== 'white' && role !== 'black') {
-      this.reject(client, 'not-playing', 'Not a player.');
+    if ((role !== 'white' && role !== 'black') || !this.isPlaying) {
+      this.reject(client, 'not-playing', 'Nothing to decline.');
       return;
     }
     const offerer = this.drawOfferBy;
@@ -507,8 +554,12 @@ export class Room {
     if (!this.isPlaying) return;
     this.clock.zero(loser);
     const winner = opposite(loser);
-    // A player who cannot construct a mate cannot win on time either.
-    if (!hasMatingMaterial(this.engine.fen(), winner)) {
+    // A player who cannot construct a mate cannot win on time either — but only
+    // where mate is the win condition. Fog of War is decided by capturing the
+    // king, so there even a lone knight is a winning force and the downgrade
+    // must not apply.
+    const mateRequired = this.variant !== 'fog';
+    if (mateRequired && !hasMatingMaterial(this.engine.fen(), winner)) {
       this.#end('1/2-1/2', 'timeout-vs-insufficient', null);
       return;
     }
@@ -539,6 +590,7 @@ export class Room {
    */
   #end(result, reason, winner) {
     this.clock.stop();
+    this.#clearAbort();
     this.status = { state: 'over', result, reason: /** @type {any} */ (reason), winner };
     this.drawOfferBy = null;
     this.rematchAsked.clear();

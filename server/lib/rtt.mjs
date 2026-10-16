@@ -1,34 +1,47 @@
 /**
- * Per-connection round-trip-time estimation.
+ * Per-connection round-trip-time estimation, used to size the per-move lag
+ * credit. Because that credit is literally free time, the estimate has to be
+ * hard for a client to inflate.
  *
- * Two independent sample sources feed one estimator:
+ * Two sample sources, deliberately *not* equal in weight:
  *
  *  1. WebSocket control frames (`ws.ping()` → `'pong'` event). Both timestamps
- *     are taken from the server's own clock, so this is a true, unambiguous
- *     round trip. It is the primary source and also doubles as liveness
- *     detection.
+ *     are the server's own, so this is a true round trip that a client cannot
+ *     forge. It is authoritative whenever it is available, and it doubles as
+ *     liveness detection.
  *
  *  2. Application-level `ping {t0}` messages. `t0` is a *client* clock reading,
- *     so `recvTs - t0` is "clock offset + one-way delay" and cannot be used
- *     directly. We track the running minimum of that quantity as the offset
- *     baseline (the fastest observed packet is the one with the least queuing
- *     delay), then treat each sample's excess over the baseline as one-way
- *     delay and double it. This is the standard NTP-style trick and keeps the
- *     estimate useful even for clients that never answer control frames.
+ *     so `recvTs - t0` is "clock offset + one-way delay". We take the minimum
+ *     over a sliding window as the offset baseline and treat each sample's
+ *     excess over it as one-way delay (the NTP-style trick). This path only
+ *     feeds the estimate for peers that never answer control frames.
  *
- * The estimate is the *median* of the recent window rather than the mean: a
- * single stalled packet must not hand a player hundreds of milliseconds of
- * free lag credit.
+ * The estimate is the *median* of the recent window rather than the mean, so a
+ * single stalled packet cannot hand a player a large chunk of free time.
  */
 
 const WINDOW = 8;
+/** Offsets expire from the window, so one bogus `t0` cannot poison it forever. */
+const OFFSET_WINDOW = 16;
 const MAX_PLAUSIBLE_RTT_MS = 2_000;
 
+/**
+ * @param {number[]} values
+ * @returns {number}
+ */
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
 export class RttEstimator {
-  /** @type {number[]} */
-  #samples = [];
-  /** Lowest observed `recvTs - t0`, i.e. clock offset plus best-case one-way delay. */
-  #offsetBaseline = Number.POSITIVE_INFINITY;
+  /** @type {number[]} Server-measured round trips (trusted). */
+  #frames = [];
+  /** @type {number[]} Round trips derived from client `ping.t0` (untrusted). */
+  #derived = [];
+  /** @type {number[]} Recent `recvTs - t0` readings; their minimum is the offset baseline. */
+  #offsets = [];
 
   /**
    * Records a directly measured round trip (WebSocket pong frame).
@@ -37,7 +50,7 @@ export class RttEstimator {
    */
   addRoundTrip(rttMs) {
     if (!Number.isFinite(rttMs) || rttMs < 0) return;
-    this.#push(Math.min(rttMs, MAX_PLAUSIBLE_RTT_MS));
+    push(this.#frames, Math.min(rttMs, MAX_PLAUSIBLE_RTT_MS), WINDOW);
   }
 
   /**
@@ -48,32 +61,43 @@ export class RttEstimator {
    */
   addPing(t0, recvTs) {
     if (!Number.isFinite(t0)) return;
-    const observed = recvTs - t0;
-    if (observed < this.#offsetBaseline) this.#offsetBaseline = observed;
-    const oneWay = observed - this.#offsetBaseline;
-    if (oneWay <= 0) return; // This sample *defined* the baseline; it carries no delay info.
-    this.#push(Math.min(oneWay * 2, MAX_PLAUSIBLE_RTT_MS));
+    push(this.#offsets, recvTs - t0, OFFSET_WINDOW);
+    const oneWay = recvTs - t0 - Math.min(...this.#offsets);
+    if (oneWay <= 0) return; // This sample *defined* the baseline; no delay info.
+    const rtt = oneWay * 2;
+    // An implausible delay means the client's clock jumped (or is lying), not
+    // that the network is slow. Drop the sample rather than clamping it, so a
+    // single skewed `t0` cannot pin the estimate to the ceiling.
+    if (rtt > MAX_PLAUSIBLE_RTT_MS) return;
+    push(this.#derived, rtt, WINDOW);
   }
 
   /**
    * Smoothed estimate in milliseconds; 0 until at least one sample arrives.
+   *
+   * Server-measured frames win outright when present: a client that answers
+   * control frames cannot talk its way into a bigger lag credit.
+   *
    * @returns {number}
    */
   get rttMs() {
-    if (this.#samples.length === 0) return 0;
-    const sorted = [...this.#samples].sort((a, b) => a - b);
-    const mid = sorted.length >> 1;
-    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    if (this.#frames.length > 0) return median(this.#frames);
+    if (this.#derived.length > 0) return median(this.#derived);
+    return 0;
   }
 
   /** @returns {number} */
   get sampleCount() {
-    return this.#samples.length;
+    return this.#frames.length + this.#derived.length;
   }
+}
 
-  /** @param {number} v */
-  #push(v) {
-    this.#samples.push(v);
-    if (this.#samples.length > WINDOW) this.#samples.shift();
-  }
+/**
+ * @param {number[]} arr
+ * @param {number} value
+ * @param {number} limit
+ */
+function push(arr, value, limit) {
+  arr.push(value);
+  if (arr.length > limit) arr.shift();
 }

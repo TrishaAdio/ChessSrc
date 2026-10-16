@@ -34,15 +34,19 @@ and plays complete games (standard, Chess960, Fog of War).
 | `PORT` | `8787` | WebSocket **and** `/health` port. |
 | `HOST` | `0.0.0.0` | Bind address. |
 | `ABANDON_GRACE_MS` | `30000` | Reconnection window before a dropped player forfeits. |
+| `FIRST_MOVE_ABORT_MS` | `30000` | How long the opening move may take before the game aborts. The first move is free of clock time, so it needs its own bound. |
+| `MAX_CONNECTIONS` | `1000` | Back-stop against socket exhaustion; further connections get `rate-limited` and are closed. |
+| `ALLOWED_ORIGINS` | *(unset)* | Comma-separated `Origin` allowlist for the WebSocket upgrade. Unset allows any origin, which is right for the desktop shell and local dev but should be set in a hosted deployment. |
 | `QUIET` | *(unset)* | Set to `1` to silence per-event logging. |
 | `TEST_FAST_CLOCK_MS` | *(unset)* | **Test only.** Overrides the initial time of every time control (except `unlimited`) with this many milliseconds, so flag-fall can be exercised in under a second instead of a minute. |
 | `TEST_CHESS960_ID` | *(unset)* | **Test only.** Pins every Chess960 game to this position id (`0`–`959`) instead of drawing one at random, making castling tests deterministic. |
 
 The two `TEST_*` hooks exist purely so the test suite stays fast and
 deterministic; leave them unset in production. `startServer()` is also exported
-from `server/index.mjs` and accepts the same settings as options
-(`port`, `host`, `initialMsOverride`, `chess960Id`, `abandonGraceMs`, `quiet`),
-which is how `test-server.mjs` boots in-process servers.
+from `server/index.mjs` and accepts all of the above as options (`port`, `host`,
+`initialMsOverride`, `chess960Id`, `abandonGraceMs`, `firstMoveAbortMs`,
+`maxConnections`, `allowedOrigins`, `quiet`), which is how `test-server.mjs`
+boots in-process servers.
 
 ## HTTP endpoint
 
@@ -94,9 +98,34 @@ win is downgraded to `timeout-vs-insufficient` when the winner holds only a bare
 king, king + one knight or king + one bishop. `unlimited` reports
 `clocks: null`.
 
-**Reconnection.** A dropped player keeps their seat for `ABANDON_GRACE_MS`;
-re-sending `join {code}` reclaims it. If the window closes during a live game
-the result is `abandoned` in favour of whoever is still present.
+**Reconnection.** A dropped *socket* keeps its seat for `ABANDON_GRACE_MS`;
+re-sending `join {code}` reclaims it, and the seat keeps the original player's
+name. If the window closes during a live game the result is `abandoned` in
+favour of whoever is still present. An explicit `leave` is deliberate, so it
+forfeits immediately instead of holding the opponent for the full window.
 
 **Colours** are drawn from `crypto.randomInt`, never from queue or join order,
 and are swapped on every rematch.
+
+**Chess960.** `RoomState.startFen` is `chess960Setup(chess960Id).fen` verbatim,
+never re-rendered by the engine, so a client can always rebuild the position
+from the advertised id. (The engine prints equivalent-but-different castling
+rights — `HDhd` vs `KDkd` — for 84 of the 960 positions.) Castling may be sent
+as king-onto-rook (`e1`→`h1`); the broadcast reports the engine's normalised
+king path (`e1`→`g1`).
+
+## Known limitations
+
+- **Fog of War is not hidden on the wire.** `RoomState.fen`, every
+  `WireMove.fen` and every `move` broadcast carry the full position to both
+  players. `protocol.ts` has no per-role view (no masked FEN, no visible-square
+  set), and `moves` reveals every origin and destination anyway, so masking
+  cannot be done without a protocol change. Treat multiplayer `fog` as
+  "variant rules, no concealment" until the protocol gains a per-role
+  projection. The engine's `vision(color)` is ready for that.
+- **The room code is the reconnection credential.** The protocol has no resume
+  token and a reconnecting client necessarily arrives with a fresh `hello` id,
+  so anyone holding the six-character code can claim a seat that is vacant
+  inside the grace window. Adding a per-seat token to the `room` message would
+  close this and is the natural next protocol bump.
+- **State is in-memory and single-process.** See *Deploy* above.
